@@ -388,10 +388,11 @@ class OscillatorSpec(BaseModel):
     )
     spectral_warp_freq_lo: float = Field(
         20.0,
-        ge=20.0,
+        ge=0.0,
         le=20000.0,
         description="spectral_source only. Hz, low edge of the "
-        "frequency range warp_mode's spectral effect applies to.",
+        "frequency range warp_mode's spectral effect applies to. Real presets go "
+        "below 20 (a Factory preset uses 15.9).",
     )
     spectral_warp_freq_hi: float = Field(
         20000.0,
@@ -513,13 +514,13 @@ class OscillatorSpec(BaseModel):
     )
     filter_balance: float | None = Field(
         None,
-        ge=0.0,
+        ge=-100.0,
         le=100.0,
         description="Only meaningful when filter_routing='filter' (or left unset) AND "
         "two filters are enabled -- balance of this oscillator's signal between Filter 1 "
-        "and Filter 2. Exact scale not independently confirmed; higher values are "
-        "believed to lean toward Filter 2 (see docs/PARAMETER_SCHEMA.md). Leave unset to "
-        "use Serum's own default balance.",
+        "and Filter 2. Bipolar: real presets use -98.6 to 100. Exact scale not "
+        "independently confirmed; higher values are believed to lean toward Filter 2 "
+        "(see docs/PARAMETER_SCHEMA.md). Leave unset to use Serum's own default balance.",
     )
     fx_bus1_send: float | None = Field(
         None,
@@ -619,7 +620,12 @@ class FilterSpec(BaseModel):
 
 class EnvelopeSpec(BaseModel):
     attack: float = Field(0.0005, ge=0.0, le=10.0, description="seconds")
-    hold: float = Field(0.0, ge=0.0, le=5.2, description="seconds, full level before decay starts")
+    hold: float = Field(
+        0.0,
+        ge=0.0,
+        le=32.0,
+        description="seconds, full level before decay starts. Real presets reach 32.",
+    )
     decay: float = Field(1.0, ge=0.0, le=32.0, description="seconds")
     sustain: float = Field(1.0, ge=0.0, le=1.0)
     release: float = Field(0.015, ge=0.0, le=32.0, description="seconds")
