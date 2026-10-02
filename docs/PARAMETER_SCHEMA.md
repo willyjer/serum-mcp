@@ -1210,7 +1210,9 @@ directly rather than trusting the extracted `PresetSpec` was complete:
     `"none"`. `filter_balance` (-100 to 100) sets `kParamFilterBalance` when both
     filters are in use and this oscillator routes through them; exact scale
     still not independently confirmed (see item 11), only that a real
-    Dreams route used 100.0 while visually routed toward Filter 2. Left
+    Dreams route used 100.0 while visually routed toward Filter 2. The
+    range is bipolar: 15 Factory presets store negative values (down to
+    -98.6), which crashed `describe_preset` until 2026-10-01. Left
     unset, nothing is written, matching the real absent-state default
     (`kRoutingDestFilter`) rather than writing it explicitly. Verified by
     extracting both fields back out of the real one-off `RoutingSlot0-4`
@@ -1430,7 +1432,9 @@ improve generation quality if resolved:
      `LFO_PARAMS['kParamSmooth']` (94% absent across a 2652-slot survey,
      previously excluded from the omit table for "no evidence either
      way" — now has it), and `ENV_PARAMS['kParamHold']` (96% absent
-     across 2504 slots). **Explicitly NOT fixed despite looking similar
+     across 2504 slots; its max was raised from 5.2 to 32 s on 2026-10-01
+     after `BRAINWAVEZ - BS Guilty` stored 32.0, the same ceiling as
+     decay/release). **Explicitly NOT fixed despite looking similar
      in the diff**, because a corpus check found real majority presence
      (correctly staying always-explicit): `LFO_PARAMS['kParamMode']` (63%
      present), `MACRO_PARAMS['kParamValue']` (59%, counting the fully
@@ -1817,6 +1821,9 @@ improve generation quality if resolved:
      matching the source's own natural broadband character) — a clean,
      monotonic, correctly-directioned result with no live-typing
      calibration needed at all.
+   - **`kParamFreqLo` min lowered from 20 to 0 Hz (2026-10-01).** Factory
+     `SC - Birds` stores 15.9 Hz, which crashed `describe_preset`. 0 is a
+     safe floor, not Serum's own: that wasn't probed.
    - **`kParamScanRate`/`kParamPosition` (the outer-`Oscillator{i}`
      "SCAN" system flagged as unwired above) confirmed to have a real,
      measurable effect**, resolving the earlier "sweeping it live made no
