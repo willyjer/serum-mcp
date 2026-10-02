@@ -104,3 +104,21 @@ def test_shows_unknown_synced_divisions_as_raw_rates(tmp_path):
     assert "LFO 1: rate=sync 1/8" in summary
     assert "LFO 2: rate=sync raw 37.50 triplets" in summary
     assert "LFO 3: rate=4.00Hz" in summary
+
+
+def test_tags_a_route_with_an_undecoded_aux_source_as_raw(tmp_path):
+    # extract_spec drops an aux source it can't name, so edit_preset can't
+    # address this route as it stands.
+    def patch(data):
+        data["ModSlot0"] = _route("Oscillator", 0, "kParamVolume", [6, 999], 10.0)
+
+    routes = _mod_matrix(_describe(tmp_path, patch))
+
+    assert routes == ["  - lfo0 via source#999 -> oscillator0.volume: +10%  (raw)"]
+
+
+def test_shows_a_free_lfo_without_a_stored_rate_at_the_measured_default(tmp_path):
+    def patch(data):
+        data["LFO0"] = {"plainParams": {"kParamBeatSync": 0.0, "kParamMode": "kLFOMode_Trig"}}
+
+    assert "LFO 1: rate=6.25Hz (default)" in _describe(tmp_path, patch)

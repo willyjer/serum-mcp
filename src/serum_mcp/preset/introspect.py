@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 from serum_mcp import config
 from serum_mcp.generation.spec import (
@@ -45,6 +45,7 @@ _REVERSE_MOD_SOURCE_IDS = {v: k for k, v in schema.MOD_SOURCE_IDS.items()}
 _REVERSE_MOD_DEST_TARGETS = {
     (d.dest_type, d.dest_id, d.param_name): name for name, d in schema.MOD_DEST_TARGETS.items()
 }
+_FX_TYPE_NAMES = frozenset(schema.FX_TYPE_IDS.values())
 
 
 def _resolve(plain_params: Any, key: str, param_defs: dict[str, schema.ParamDef]) -> Any:
@@ -82,11 +83,20 @@ def count_unmodeled_fx_units(data: dict[str, Any]) -> int:
     return count
 
 
-def _modeled_fx_units(data: dict[str, Any]) -> list[tuple[int, int, str, dict[str, Any]]]:
-    """``(rack, destModuleID, fx_name, entry)`` for each FX unit extract_spec
-    models, in fx_chain order. destModuleID is rack*100 + position within
-    that rack (see mapping._fx_dest_module_id), which is NOT the flat
-    fx_chain index once more than one rack is in use."""
+class _FxUnit(NamedTuple):
+    """One FX unit extract_spec models. ``module_id`` is the destModuleID
+    ModSlots use for it: rack*100 + position within that rack (see
+    mapping._fx_dest_module_id), which is NOT the flat fx_chain index once
+    more than one rack is in use."""
+
+    rack: int
+    module_id: int
+    fx_name: str
+    entry: dict[str, Any]
+
+
+def _modeled_fx_units(data: dict[str, Any]) -> list[_FxUnit]:
+    """Each FX unit extract_spec models, in fx_chain order."""
     units = []
     for rack in range(3):
         entries = (data.get(f"FXRack{rack}", {}) or {}).get("FX", []) or []
@@ -105,12 +115,12 @@ def _modeled_fx_units(data: dict[str, Any]) -> list[tuple[int, int, str, dict[st
                 # towards this rack's position (Serum itself counts it), so
                 # later real units' destModuleID stays correctly aligned.
                 continue
-            units.append((rack, rack * 100 + position, fx_name, entry))
+            units.append(_FxUnit(rack, rack * 100 + position, fx_name, entry))
     return units
 
 
 def _mod_dest_names(
-    fx_units: list[tuple[int, int, str, dict[str, Any]]],
+    fx_units: list[_FxUnit],
 ) -> dict[tuple[Any, Any, Any], str]:
     """ModSlot ``(destModuleTypeString, destModuleID, destModuleParamName)``
     -> the destination name generation uses.
@@ -123,12 +133,12 @@ def _mod_dest_names(
     fx_chain. The FX_EXTRA_MOD_DEST_PARAMS entries mirror the write side's
     confirmed non-wet FX params, per type. Static targets win a clash."""
     names: dict[tuple[Any, Any, Any], str] = {}
-    for idx, (_rack, module_id, fx_name, _entry) in enumerate(fx_units):
-        names[(fx_name, module_id, "kParamWet")] = f"fx{idx}.wet"
+    for idx, unit in enumerate(fx_units):
+        names[(unit.fx_name, unit.module_id, "kParamWet")] = f"fx{idx}.wet"
         for suffix, (param_name, _param_id) in schema.FX_EXTRA_MOD_DEST_PARAMS.get(
-            fx_name, {}
+            unit.fx_name, {}
         ).items():
-            names[(fx_name, module_id, param_name)] = f"fx{idx}.{suffix}"
+            names[(unit.fx_name, unit.module_id, param_name)] = f"fx{idx}.{suffix}"
     names.update(_REVERSE_MOD_DEST_TARGETS)
     return names
 
@@ -173,7 +183,8 @@ class ActiveModRoute:
 
     ``source``/``destination``/``aux_source`` use the names generation uses
     (``lfo0``, ``oscillator0.volume``) where they exist. ``modeled`` is True
-    when edit_preset's ``mod_routes`` can address the route. An end without
+    when edit_preset's ``mod_routes`` can address the route, which takes a
+    named source, aux source (if any) and destination. An end without
     a name falls back to a raw label: ``source#<id>`` for an undecoded
     source, ``<Type><id>.<param>`` for a destination such as
     ``Oscillator1.kParamCoarsePit``, or ``FXRack<r>[<position>].<Type>.<param>``
@@ -187,9 +198,6 @@ class ActiveModRoute:
     aux_source: str | None
     modeled: bool
     curve: bool
-
-
-_FX_TYPE_NAMES = frozenset(schema.FX_TYPE_IDS.values())
 
 
 def _raw_dest_label(entry: dict[str, Any]) -> str:
@@ -221,7 +229,11 @@ def active_mod_routes(data: dict[str, Any]) -> list[ActiveModRoute]:
                 amount=pp.get("kParamAmount", 0.0),
                 bipolar=bool(pp.get("kParamBipolar", False)),
                 aux_source=_source_label(src[1]) if src[1] else None,
-                modeled=src[0] in _REVERSE_MOD_SOURCE_IDS and dest_name is not None,
+                modeled=(
+                    src[0] in _REVERSE_MOD_SOURCE_IDS
+                    and (not src[1] or src[1] in _REVERSE_MOD_SOURCE_IDS)
+                    and dest_name is not None
+                ),
                 curve="flex" in entry,
             )
         )
@@ -658,8 +670,9 @@ def extract_spec(data: dict[str, Any]) -> PresetSpec:
 
     fx_units = _modeled_fx_units(data)
     fx_chain = []
-    for rack, _module_id, fx_name, entry in fx_units:
-        pp = entry[fx_name].get("plainParams")
+    for unit in fx_units:
+        fx_name = unit.fx_name
+        pp = unit.entry[fx_name].get("plainParams")
         if not isinstance(pp, dict):
             # Real-world finding: an FX unit's plainParams can be the raw
             # string sentinel "default" (same pattern as VoiceFilter0/1
@@ -677,9 +690,9 @@ def extract_spec(data: dict[str, Any]) -> PresetSpec:
         params = {k: v for k, v in pp.items() if k != "kParamWet"}
         # Opaque passthrough, see FxUnitSpec.flex's docstring -- only
         # preserved for round-trip, semantics not interpreted here.
-        flex = entry.get("flex")
+        flex = unit.entry.get("flex")
         flex = flex if isinstance(flex, list) else None
-        fx_chain.append(FxUnitSpec(type=fx_name, wet=wet, params=params, rack=rack, flex=flex))
+        fx_chain.append(FxUnitSpec(type=fx_name, wet=wet, params=params, rack=unit.rack, flex=flex))
 
     # Only routes whose source AND destination are both in our resolved
     # vocabulary (see schema.MOD_SOURCE_IDS / MOD_DEST_TARGETS) round-trip

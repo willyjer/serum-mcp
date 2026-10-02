@@ -17,7 +17,8 @@ _KNOWN_SYNC_DIVISIONS = {0.0: "1/4", 10.66: "1/8"}
 def _lfo_rate(lfo: LfoSpec) -> str:
     """An LFO is tempo-synced unless kParamBeatSync is explicitly off."""
     if lfo.beat_sync is False:
-        return f"{lfo.rate:.2f}Hz" if lfo.rate else "free default"
+        # Absent rate in free mode measured 6.25 Hz (schema.LFO_PARAMS["kParamRate"]).
+        return f"{lfo.rate:.2f}Hz" if lfo.rate else "6.25Hz (default)"
     division = _KNOWN_SYNC_DIVISIONS.get(round(lfo.rate, 2))
     rate = f"sync {division}" if division else f"sync raw {lfo.rate:.2f}"
     dotted = " dotted" if lfo.dotted else ""
@@ -107,7 +108,7 @@ def describe_preset(preset_path: str) -> str:
         )
 
     routes = active_mod_routes(preset.data)
-    route_sources = {r.source for r in routes} | {r.aux_source for r in routes}
+    route_sources = {r.source for r in routes} | {r.aux_source for r in routes if r.aux_source}
     active_lfos = [
         (i, lfo)
         for i, lfo in enumerate(spec.lfos, start=1)
