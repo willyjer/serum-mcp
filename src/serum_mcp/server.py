@@ -1041,7 +1041,9 @@ def list_parameters() -> str:
 )
 def describe_preset(preset_path: str) -> str:
     """Return a human-readable summary of an existing preset's sound-shaping
-    parameters (oscillators, filters, envelopes, FX chain, mod routes, globals)."""
+    parameters (oscillators, filters, envelopes, FX chain, mod routes, globals).
+    Every active mod route is listed; routes edit_preset can't address (pitch,
+    most FX params, LFO point-mod buses) are shown by raw name and tagged (raw)."""
     return _describe_preset(preset_path)
 
 

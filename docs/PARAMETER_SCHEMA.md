@@ -1594,6 +1594,14 @@ improve generation quality if resolved:
      hand-typed spec silently drifts from ground truth in a way that's
      easy to mistake for a code bug when it's actually a transcription
      gap in the test fixture itself.
+
+   **`describe_preset` no longer under-reports (2026-10-01).** It lists
+   every `ModSlot` with a source and a destination via
+   `introspect.active_mod_routes`, not just the routes `extract_spec` can
+   name. Unmodeled ends show by raw name (`Oscillator1.kParamCoarsePit`,
+   `FXRack0[2].FXFilter.kParamFreq`, `source#<id>`) and the route is tagged
+   `(raw)`. `extract_spec` itself is unchanged: `edit_preset` still sees only
+   the routes it can address.
 2. **Filter cutoff Hz curve** (§4, Filters) — **calibrated 2026-07-31** via the
    [[reference-serum-verify-audio-pipeline]] (a full sweep, not one point):
    a `lowpass_24` filter fed White noise (full-spectrum, no self-bias) at

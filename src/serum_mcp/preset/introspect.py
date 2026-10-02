@@ -9,6 +9,8 @@ the confirmed defaults recorded in :mod:`.schema`.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 from serum_mcp import config
@@ -78,6 +80,152 @@ def count_unmodeled_fx_units(data: dict[str, Any]) -> int:
             if fx_name is not None and fx_name in entry and fx_name not in schema.FX_PARAMS:
                 count += 1
     return count
+
+
+def _modeled_fx_units(data: dict[str, Any]) -> list[tuple[int, int, str, dict[str, Any]]]:
+    """``(rack, destModuleID, fx_name, entry)`` for each FX unit extract_spec
+    models, in fx_chain order. destModuleID is rack*100 + position within
+    that rack (see mapping._fx_dest_module_id), which is NOT the flat
+    fx_chain index once more than one rack is in use."""
+    units = []
+    for rack in range(3):
+        entries = (data.get(f"FXRack{rack}", {}) or {}).get("FX", []) or []
+        for position, entry in enumerate(entries):
+            fx_name = schema.FX_TYPE_IDS.get(entry.get("type"))
+            if fx_name is None or fx_name not in entry or fx_name not in schema.FX_PARAMS:
+                # fx_name is None: a genuinely unknown FX type ID (not even
+                # in FX_TYPE_IDS) -- e.g. a future Serum version's new FX
+                # type this project hasn't caught up on. fx_name not in
+                # schema.FX_PARAMS: a KNOWN type ID with no schema entry yet
+                # (see count_unmodeled_fx_units) -- as of 2026-07-30 all 16
+                # known FX_TYPE_IDS are modeled (FXSplit/FXSplit3/FXSplitMS
+                # included, see docs/PARAMETER_SCHEMA.md item 5), so this
+                # branch is a forward-compat safety net today, not a real
+                # gap. Either way: skip rather than crash. Still counts
+                # towards this rack's position (Serum itself counts it), so
+                # later real units' destModuleID stays correctly aligned.
+                continue
+            units.append((rack, rack * 100 + position, fx_name, entry))
+    return units
+
+
+def _mod_dest_names(
+    fx_units: list[tuple[int, int, str, dict[str, Any]]],
+) -> dict[tuple[Any, Any, Any], str]:
+    """ModSlot ``(destModuleTypeString, destModuleID, destModuleParamName)``
+    -> the destination name generation uses.
+
+    fx{i}.wet destinations aren't in the static _REVERSE_MOD_DEST_TARGETS
+    table -- an FX rack slot's destModuleTypeString is whichever FX type is
+    actually there, only known from this preset's own FX units (see
+    mapping._resolve_mod_destination). Keyed by the real destModuleID but
+    NAMED with the flat fx_chain index, matching how generation addresses
+    fx_chain. The FX_EXTRA_MOD_DEST_PARAMS entries mirror the write side's
+    confirmed non-wet FX params, per type. Static targets win a clash."""
+    names: dict[tuple[Any, Any, Any], str] = {}
+    for idx, (_rack, module_id, fx_name, _entry) in enumerate(fx_units):
+        names[(fx_name, module_id, "kParamWet")] = f"fx{idx}.wet"
+        for suffix, (param_name, _param_id) in schema.FX_EXTRA_MOD_DEST_PARAMS.get(
+            fx_name, {}
+        ).items():
+            names[(fx_name, module_id, param_name)] = f"fx{idx}.{suffix}"
+    names.update(_REVERSE_MOD_DEST_TARGETS)
+    return names
+
+
+def _dest_key(entry: dict[str, Any]) -> tuple[Any, Any, Any]:
+    return (
+        entry.get("destModuleTypeString"),
+        entry.get("destModuleID"),
+        entry.get("destModuleParamName"),
+    )
+
+
+def _active_mod_slots(
+    data: dict[str, Any],
+) -> Iterator[tuple[int, dict[str, Any], dict[str, Any]]]:
+    """``(slot index, entry, plainParams)`` for each ModSlot that has both a
+    source and a destination, in the data's own key order. Unused slots are
+    ``{"plainParams": "default"}``; a few real slots keep a source with no
+    destination, which isn't a route either."""
+    for key, entry in data.items():
+        if not (isinstance(key, str) and key.startswith("ModSlot") and isinstance(entry, dict)):
+            continue
+        index = key[len("ModSlot") :]
+        src = entry.get("source")
+        if not (index.isdigit() and isinstance(src, list) and len(src) == 2):
+            continue
+        if not entry.get("destModuleTypeString"):
+            continue
+        pp = entry.get("plainParams")
+        if not isinstance(pp, dict):
+            # Same "default" string sentinel pattern as the FX/VoiceFilter
+            # cases -- `.get("plainParams", {}) or {}` doesn't catch it
+            # since a non-empty string is truthy (found live on a real
+            # Factory preset's ModSlot, not just third-party content).
+            pp = {}
+        yield int(index), entry, pp
+
+
+@dataclass(frozen=True)
+class ActiveModRoute:
+    """One active mod-matrix route, as describe_preset shows it.
+
+    ``source``/``destination``/``aux_source`` use the names generation uses
+    (``lfo0``, ``oscillator0.volume``) where they exist. ``modeled`` is True
+    when edit_preset's ``mod_routes`` can address the route. An end without
+    a name falls back to a raw label: ``source#<id>`` for an undecoded
+    source, ``<Type><id>.<param>`` for a destination such as
+    ``Oscillator1.kParamCoarsePit``, or ``FXRack<r>[<position>].<Type>.<param>``
+    for an FX unit's."""
+
+    slot: int
+    source: str
+    destination: str
+    amount: float
+    bipolar: bool
+    aux_source: str | None
+    modeled: bool
+    curve: bool
+
+
+_FX_TYPE_NAMES = frozenset(schema.FX_TYPE_IDS.values())
+
+
+def _raw_dest_label(entry: dict[str, Any]) -> str:
+    dest_type, dest_id, param = _dest_key(entry)
+    if dest_type in _FX_TYPE_NAMES and isinstance(dest_id, int):
+        rack, position = divmod(dest_id, 100)
+        return f"FXRack{rack}[{position}].{dest_type}.{param}"
+    return f"{dest_type}{dest_id}.{param}"
+
+
+def _source_label(source_id: Any) -> str:
+    return _REVERSE_MOD_SOURCE_IDS.get(source_id) or f"source#{source_id}"
+
+
+def active_mod_routes(data: dict[str, Any]) -> list[ActiveModRoute]:
+    """Every active route in the mod matrix, in slot order -- including the
+    ones :func:`extract_spec` leaves out because it can't name them (pitch,
+    most FX params, LFO point-mod buses, undecoded sources)."""
+    dest_names = _mod_dest_names(_modeled_fx_units(data))
+    routes = []
+    for slot, entry, pp in _active_mod_slots(data):
+        src = entry["source"]
+        dest_name = dest_names.get(_dest_key(entry))
+        routes.append(
+            ActiveModRoute(
+                slot=slot,
+                source=_source_label(src[0]),
+                destination=dest_name or _raw_dest_label(entry),
+                amount=pp.get("kParamAmount", 0.0),
+                bipolar=bool(pp.get("kParamBipolar", False)),
+                aux_source=_source_label(src[1]) if src[1] else None,
+                modeled=src[0] in _REVERSE_MOD_SOURCE_IDS and dest_name is not None,
+                curve="flex" in entry,
+            )
+        )
+    return sorted(routes, key=lambda route: route.slot)
 
 
 # Coarsest-first: straight subdivisions down to 64th notes, plus their
@@ -508,108 +656,47 @@ def extract_spec(data: dict[str, Any]) -> PresetSpec:
             )
         )
 
+    fx_units = _modeled_fx_units(data)
     fx_chain = []
-    # module_id_by_flat_index[i] = fx_chain[i]'s real destModuleID
-    # (rack*100 + position-within-that-rack, see mapping._fx_dest_module_id)
-    # -- needed below to match ModSlot destinations, which is NOT the same
-    # as i once more than one rack is in use.
-    module_id_by_flat_index: list[int] = []
-    for rack in range(3):
-        position_in_rack = 0
-        for entry in (data.get(f"FXRack{rack}", {}) or {}).get("FX", []) or []:
-            type_id = entry.get("type")
-            fx_name = schema.FX_TYPE_IDS.get(type_id)
-            if fx_name is None or fx_name not in entry or fx_name not in schema.FX_PARAMS:
-                # fx_name is None: a genuinely unknown FX type ID (not even
-                # in FX_TYPE_IDS) -- e.g. a future Serum version's new FX
-                # type this project hasn't caught up on. fx_name not in
-                # schema.FX_PARAMS: a KNOWN type ID with no schema entry yet
-                # (see count_unmodeled_fx_units) -- as of 2026-07-30 all 16
-                # known FX_TYPE_IDS are modeled (FXSplit/FXSplit3/FXSplitMS
-                # included, see docs/PARAMETER_SCHEMA.md item 5), so this
-                # branch is a forward-compat safety net today, not a real
-                # gap. Either way: skip rather than crash. Still counts
-                # towards this rack's position (Serum itself counts it), so
-                # later real units' destModuleID stays correctly aligned.
-                position_in_rack += 1
-                continue
-            pp = entry[fx_name].get("plainParams")
-            if not isinstance(pp, dict):
-                # Real-world finding: an FX unit's plainParams can be the raw
-                # string sentinel "default" (same pattern as VoiceFilter0/1
-                # when never touched, see _sub_plain_params) instead of a
-                # dict -- `.get("plainParams", {}) or {}` doesn't catch this
-                # since a non-empty string is truthy, and used to crash with
-                # AttributeError on the next line.
-                pp = {}
-            # kParamWet absent means fully wet (100.0) for every FX type,
-            # confirmed live 2026-07-29 -- see mapping.build_fx_unit. Each
-            # FX_PARAMS type's own schema default (e.g. FXDelay's 30.0) is
-            # only what's typically OBSERVED when the key is present, not
-            # the true absent-state value, so it must not be used here.
-            wet = pp.get("kParamWet", 100.0)
-            params = {k: v for k, v in pp.items() if k != "kParamWet"}
-            # Opaque passthrough, see FxUnitSpec.flex's docstring -- only
-            # preserved for round-trip, semantics not interpreted here.
-            flex = entry.get("flex")
-            flex = flex if isinstance(flex, list) else None
-            fx_chain.append(FxUnitSpec(type=fx_name, wet=wet, params=params, rack=rack, flex=flex))
-            module_id_by_flat_index.append(rack * 100 + position_in_rack)
-            position_in_rack += 1
-
-    # fx{i}.wet destinations aren't in the static _REVERSE_MOD_DEST_TARGETS
-    # table -- an FX rack slot's destModuleTypeString is whichever FX type
-    # is actually there, only known from this preset's own fx_chain (see
-    # mapping._resolve_mod_destination). Keyed by the real destModuleID
-    # (module_id_by_flat_index[idx]), not the flat index idx itself, since
-    # those diverge once rack 1/2 are in use -- but still NAMED "fx{idx}.wet"
-    # using the flat index, matching how generation addresses fx_chain.
-    fx_wet_dest_by_key = {
-        (fx.type, module_id_by_flat_index[idx], "kParamWet"): f"fx{idx}.wet"
-        for idx, fx in enumerate(fx_chain)
-    }
-    # Mirrors mapping._resolve_mod_destination's FX_EXTRA_MOD_DEST_PARAMS
-    # handling on the write side -- confirmed non-wet FX params, per type.
-    for idx, fx in enumerate(fx_chain):
-        for suffix, (param_name, _param_id) in schema.FX_EXTRA_MOD_DEST_PARAMS.get(
-            fx.type, {}
-        ).items():
-            fx_wet_dest_by_key[(fx.type, module_id_by_flat_index[idx], param_name)] = (
-                f"fx{idx}.{suffix}"
-            )
+    for rack, _module_id, fx_name, entry in fx_units:
+        pp = entry[fx_name].get("plainParams")
+        if not isinstance(pp, dict):
+            # Real-world finding: an FX unit's plainParams can be the raw
+            # string sentinel "default" (same pattern as VoiceFilter0/1
+            # when never touched, see _sub_plain_params) instead of a
+            # dict -- `.get("plainParams", {}) or {}` doesn't catch this
+            # since a non-empty string is truthy, and used to crash with
+            # AttributeError on the next line.
+            pp = {}
+        # kParamWet absent means fully wet (100.0) for every FX type,
+        # confirmed live 2026-07-29 -- see mapping.build_fx_unit. Each
+        # FX_PARAMS type's own schema default (e.g. FXDelay's 30.0) is
+        # only what's typically OBSERVED when the key is present, not
+        # the true absent-state value, so it must not be used here.
+        wet = pp.get("kParamWet", 100.0)
+        params = {k: v for k, v in pp.items() if k != "kParamWet"}
+        # Opaque passthrough, see FxUnitSpec.flex's docstring -- only
+        # preserved for round-trip, semantics not interpreted here.
+        flex = entry.get("flex")
+        flex = flex if isinstance(flex, list) else None
+        fx_chain.append(FxUnitSpec(type=fx_name, wet=wet, params=params, rack=rack, flex=flex))
 
     # Only routes whose source AND destination are both in our resolved
     # vocabulary (see schema.MOD_SOURCE_IDS / MOD_DEST_TARGETS) round-trip
     # here -- everything else (undecoded sources, unmodeled destinations)
-    # is silently skipped, since we can't name it safely. It still survives
+    # is skipped, since we can't name it safely. It still survives
     # unchanged in the raw data (mapping.apply_spec never touches ModSlot
-    # keys it didn't create), it just won't show up in describe_preset or
-    # be visible to the LLM when editing.
+    # keys it didn't create), and describe_preset still shows it by raw
+    # name (see active_mod_routes), but it isn't visible to the LLM when
+    # editing.
+    dest_names = _mod_dest_names(fx_units)
     mod_routes = []
-    for key, entry in data.items():
-        if not (isinstance(key, str) and key.startswith("ModSlot") and isinstance(entry, dict)):
-            continue
-        src = entry.get("source")
-        if not (isinstance(src, list) and len(src) == 2):
-            continue
+    for _slot, entry, pp in _active_mod_slots(data):
+        src = entry["source"]
         source_name = _REVERSE_MOD_SOURCE_IDS.get(src[0])
-        if source_name is None:
+        dest_name = dest_names.get(_dest_key(entry))
+        if source_name is None or dest_name is None:
             continue
-        dest_key = (
-            entry.get("destModuleTypeString"),
-            entry.get("destModuleID"),
-            entry.get("destModuleParamName"),
-        )
-        dest_name = _REVERSE_MOD_DEST_TARGETS.get(dest_key) or fx_wet_dest_by_key.get(dest_key)
-        if dest_name is None:
-            continue
-        pp = entry.get("plainParams")
-        if not isinstance(pp, dict):
-            # Same "default" string sentinel pattern as the FX/VoiceFilter
-            # cases above -- `.get("plainParams", {}) or {}` doesn't catch
-            # it since a non-empty string is truthy (found live on a real
-            # Factory preset's ModSlot, not just third-party content).
-            pp = {}
         # source[1]/subIndex -- Serum's general "Aux"/"Via" second-source
         # system (see ModRouteSpec.aux_source / mapping._build_modslot_entry).
         # 0 is the "no aux" sentinel (no valid MOD_SOURCE_IDS value is 0);

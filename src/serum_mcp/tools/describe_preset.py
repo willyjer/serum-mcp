@@ -2,10 +2,27 @@
 
 from __future__ import annotations
 
-from serum_mcp.preset.introspect import count_unmodeled_fx_units, extract_spec
+from serum_mcp.generation.spec import LfoSpec
+from serum_mcp.preset.introspect import active_mod_routes, count_unmodeled_fx_units, extract_spec
 from serum_mcp.preset.packer import unpack_file
 
 _OSC_LABELS = ("A", "B", "C", "Noise", "Sub")
+
+# Synced kParamRate -> division. Only these two points are known (see
+# schema.LFO_PARAMS["kParamRate"]): absent (read as 0.0) is 1/4, 10.66 is 1/8.
+# Any other synced value is shown raw rather than guessed.
+_KNOWN_SYNC_DIVISIONS = {0.0: "1/4", 10.66: "1/8"}
+
+
+def _lfo_rate(lfo: LfoSpec) -> str:
+    """An LFO is tempo-synced unless kParamBeatSync is explicitly off."""
+    if lfo.beat_sync is False:
+        return f"{lfo.rate:.2f}Hz" if lfo.rate else "free default"
+    division = _KNOWN_SYNC_DIVISIONS.get(round(lfo.rate, 2))
+    rate = f"sync {division}" if division else f"sync raw {lfo.rate:.2f}"
+    dotted = " dotted" if lfo.dotted else ""
+    triplets = " triplets" if lfo.triplets else ""
+    return f"{rate}{dotted}{triplets}"
 
 
 def describe_preset(preset_path: str) -> str:
@@ -89,19 +106,20 @@ def describe_preset(preset_path: str) -> str:
             f"sustain={env.sustain:.2f}  release={env.release:.2f}s"
         )
 
+    routes = active_mod_routes(preset.data)
+    route_sources = {r.source for r in routes} | {r.aux_source for r in routes}
     active_lfos = [
         (i, lfo)
         for i, lfo in enumerate(spec.lfos, start=1)
-        if lfo.rate or lfo.mode != "Free" or lfo.shape
+        if lfo.rate or lfo.mode != "Free" or lfo.shape or f"lfo{i - 1}" in route_sources
     ]
     if active_lfos:
         lines.append("")
         for i, lfo in active_lfos:
-            sync = "  beat_sync" if lfo.beat_sync else ""
             delay = f"  delay={lfo.delay:.2f}s" if lfo.delay else ""
             shape = f"  shape={lfo.shape}" if lfo.shape else ""
             mono = "  mono" if lfo.mono else ""
-            lines.append(f"LFO {i}: rate={lfo.rate:.0f}  mode={lfo.mode}{sync}{delay}{shape}{mono}")
+            lines.append(f"LFO {i}: rate={_lfo_rate(lfo)}  mode={lfo.mode}{delay}{shape}{mono}")
 
     active_macros = [(i, m) for i, m in enumerate(spec.macros, start=1) if m.value or m.name]
     if active_macros:
@@ -125,13 +143,25 @@ def describe_preset(preset_path: str) -> str:
         )
 
     lines.append("")
-    if spec.mod_routes:
-        lines.append("Mod matrix (recognized routes only):")
-        for route in spec.mod_routes:
+    if routes:
+        raw = sum(not r.modeled for r in routes)
+        raw_note = (
+            f"; {raw} shown by raw name, which edit_preset's mod_routes can't address"
+            if raw
+            else ""
+        )
+        lines.append(f"Mod matrix ({len(routes)} active routes{raw_note}):")
+        for route in routes:
+            aux = f" via {route.aux_source}" if route.aux_source else ""
             bip = ", bipolar" if route.bipolar else ""
-            lines.append(f"  - {route.source} -> {route.destination}: {route.amount:+.0f}%{bip}")
+            curve = ", curve" if route.curve else ""
+            tag = "  (raw)" if not route.modeled else ""
+            lines.append(
+                f"  - {route.source}{aux} -> {route.destination}: "
+                f"{route.amount:+.0f}%{bip}{curve}{tag}"
+            )
     else:
-        lines.append("Mod matrix: (no recognized routes)")
+        lines.append("Mod matrix: (no active routes)")
 
     lines.append("")
     porta = (
