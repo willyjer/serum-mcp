@@ -222,7 +222,7 @@ def test_patched_values_are_32_bit_floats():
     patched, _ = _serum_style().patched(
         {"Oscillator0.plainParams.kParamVolume": 0.3, "Env0.plainParams.kParamAttack": 2}
     )
-    cbor = patched.cbor_bytes()
+    cbor = patched.encoded_cbor()
     assert _text("kParamVolume") + _f32(0.3) in cbor
     assert _text("kParamAttack") + _f32(2.0) in cbor
     assert b"\xfb" not in cbor
@@ -232,7 +232,7 @@ def test_patched_booleans_are_written_as_floats():
     patched, changes = _serum_style().patched(
         {"Env0.plainParams.kParamOn": True, "Oscillator0.plainParams.kParamVolume": False}
     )
-    cbor = patched.cbor_bytes()
+    cbor = patched.encoded_cbor()
     assert _text("kParamOn") + _f32(1.0) in cbor
     assert _text("kParamVolume") + _f32(0.0) in cbor
     assert [c.new for c in changes] == [1.0, 0.0]
@@ -279,6 +279,11 @@ def test_patch_enum_string():
         ({"Oscillator0.plainParams.kParamVolume": [1.0]}, RawValueError),
         ({"Oscillator0.plainParams": 1.0}, RawValueError),
         ({"": 1.0}, RawPathError),
+        ({"Oscillator0.WTOsc0.numFrames": True}, RawValueError),
+        ({"Oscillator0.WTOsc0.numFrames": float("inf")}, RawValueError),
+        ({"Oscillator0.WTOsc0.numFrames": float("nan")}, RawValueError),
+        ({"Oscillator0.plainParams.kParamVolume": 1e40}, RawValueError),
+        ({"Oscillator0.plainParams.kParamVolume": float("nan")}, RawValueError),
     ],
 )
 def test_patch_rejects_bad_patches(patches, error):
@@ -303,3 +308,13 @@ def test_local_library_round_trips_byte_identical():
         f for f in files if RawPreset.from_bytes(f.read_bytes()).to_bytes() != f.read_bytes()
     ]
     assert failures == []
+
+
+def test_header_flags_and_unchanged_metadata_bytes_are_kept():
+    meta = b'{"presetName":"X","n":1.0}'
+    raw = _container(meta, SERUM_STYLE_CBOR)
+    raw = raw[: len(MAGIC) + 4] + struct.pack("<I", 7) + raw[len(MAGIC) + 8 :]
+    preset = RawPreset.from_bytes(raw)
+    assert preset.to_bytes() == raw
+    preset.metadata["n"] = 1  # equal to 1.0 in Python, but not the same JSON
+    assert b'"n":1}' in preset.to_bytes()

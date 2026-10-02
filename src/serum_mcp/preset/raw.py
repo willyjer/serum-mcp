@@ -12,7 +12,8 @@ that Serum writes (definite-length maps, arrays, strings and byte strings,
 ints, floats, true/false/null; no tags) and remembers each float's width:
 32-bit floats decode to ``float``, 64-bit floats to :class:`Float64`. Encoding
 writes ``float`` as 32-bit, the way Serum does, and :class:`Float64` as
-64-bit. :class:`RawPreset` also keeps the original metadata and compressed
+64-bit. A patched value is always written as 32-bit, even over a 64-bit
+one. :class:`RawPreset` also keeps the original metadata and compressed
 bytes, and reuses them whenever the re-encoded content is unchanged.
 
 Paths are dotted, e.g. ``"Oscillator0.plainParams.kParamVolume"``; a segment
@@ -24,18 +25,22 @@ addressed directly.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
+import math
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import zstandard
+from serum_mcp.preset.packer import (
+    Container,
+    PresetFormatError,
+    compress_payload,
+    join_container,
+    split_container,
+)
 
-from serum_mcp.preset.packer import _HEADER_STRUCT, MAGIC, PresetFormatError
-
-_ZSTD_COMPRESSION_LEVEL = 19
-_PAYLOAD_FLAGS = 2
 _DEFAULT_SENTINEL = "default"
 
 
@@ -186,67 +191,47 @@ class Change:
 
 @dataclass
 class RawPreset:
-    """A preset decoded losslessly, plus the original bytes it came from."""
+    """A preset decoded losslessly, plus the stored container it came from."""
 
     metadata: dict[str, Any]
     data: dict[str, Any]
-    _meta_bytes: bytes = field(default=b"", repr=False)
-    _cbor_bytes: bytes = field(default=b"", repr=False)
-    _frame: bytes = field(default=b"", repr=False)
+    _original: Container = dataclasses.field(repr=False)
+    _original_cbor: bytes = dataclasses.field(repr=False)
 
     @classmethod
     def from_bytes(cls, raw: bytes) -> RawPreset:
-        if raw[: len(MAGIC)] != MAGIC:
-            raise PresetFormatError(
-                f"not a Serum 2 preset file: expected magic {MAGIC!r}, got {raw[: len(MAGIC)]!r}"
-            )
-        offset = len(MAGIC)
-        meta_len, _ = _HEADER_STRUCT.unpack_from(raw, offset)
-        offset += _HEADER_STRUCT.size
-        meta_bytes = raw[offset : offset + meta_len]
-        offset += meta_len
-        payload_len, payload_flags = _HEADER_STRUCT.unpack_from(raw, offset)
-        offset += _HEADER_STRUCT.size
-        if payload_flags != _PAYLOAD_FLAGS:
-            raise PresetFormatError(f"unexpected payload flags {payload_flags}")
-        frame = raw[offset:]
-        cbor_bytes = zstandard.ZstdDecompressor().decompress(frame)
-        if len(cbor_bytes) != payload_len:
-            raise PresetFormatError(
-                f"decompressed payload size mismatch: header says {payload_len}, "
-                f"got {len(cbor_bytes)}"
-            )
+        container = split_container(raw)
+        cbor_bytes = container.payload()
         return cls(
-            metadata=json.loads(meta_bytes),
+            metadata=json.loads(container.meta_bytes),
             data=decode_cbor(cbor_bytes),
-            _meta_bytes=meta_bytes,
-            _cbor_bytes=cbor_bytes,
-            _frame=frame,
+            _original=container,
+            _original_cbor=cbor_bytes,
         )
 
     @classmethod
     def from_file(cls, path: str | Path) -> RawPreset:
         return cls.from_bytes(Path(path).read_bytes())
 
-    def cbor_bytes(self) -> bytes:
+    def encoded_cbor(self) -> bytes:
+        """The current data, CBOR-encoded."""
         return encode_cbor(self.data)
 
     def to_bytes(self) -> bytes:
         """Encode the preset. Unchanged parts reuse the bytes they were read from."""
+        original = self._original
         meta_bytes = _encode_metadata(self.metadata)
-        if json.loads(meta_bytes) == json.loads(self._meta_bytes or b"null"):
-            meta_bytes = self._meta_bytes
-        cbor_bytes = self.cbor_bytes()
-        if cbor_bytes == self._cbor_bytes:
-            frame = self._frame
+        if meta_bytes == _encode_metadata(json.loads(original.meta_bytes)):
+            meta_bytes = original.meta_bytes
+        cbor_bytes = self.encoded_cbor()
+        if cbor_bytes == self._original_cbor:
+            frame = original.frame
         else:
-            frame = zstandard.ZstdCompressor(level=_ZSTD_COMPRESSION_LEVEL).compress(cbor_bytes)
-        return (
-            MAGIC
-            + _HEADER_STRUCT.pack(len(meta_bytes), 0)
-            + meta_bytes
-            + _HEADER_STRUCT.pack(len(cbor_bytes), _PAYLOAD_FLAGS)
-            + frame
+            frame = compress_payload(cbor_bytes)
+        return join_container(
+            dataclasses.replace(
+                original, meta_bytes=meta_bytes, payload_len=len(cbor_bytes), frame=frame
+            )
         )
 
     def write(self, path: str | Path) -> Path:
@@ -269,14 +254,7 @@ class RawPreset:
         """
         data = copy.deepcopy(self.data)
         changes = [_set_path(data, path, value) for path, value in patches.items()]
-        clone = RawPreset(
-            metadata=copy.deepcopy(self.metadata),
-            data=data,
-            _meta_bytes=self._meta_bytes,
-            _cbor_bytes=self._cbor_bytes,
-            _frame=self._frame,
-        )
-        return clone, changes
+        return dataclasses.replace(self, metadata=copy.deepcopy(self.metadata), data=data), changes
 
 
 # --- paths -----------------------------------------------------------------
@@ -306,30 +284,44 @@ def _child(container: Any, segment: str, walked: str) -> Any:
     raise RawPathError(f"{where} is a {type(container).__name__}, not a section")
 
 
+def _walk(node: Any, segments: list[str], create_plain_params: bool = False) -> tuple[Any, str]:
+    """Follow ``segments`` from ``node``; return where they lead and the path walked."""
+    walked = ""
+    for segment in segments:
+        if create_plain_params and _is_default_plain_params(node, segment):
+            node[segment] = {}
+        node = _child(node, segment, walked)
+        walked = f"{walked}.{segment}" if walked else segment
+    return node, walked
+
+
 def get_path(data: Any, path: str | None) -> Any:
     """Return the value at ``path``, or ``data`` itself when ``path`` is None."""
     if path is None:
         return data
-    node, walked = data, ""
-    for segment in _split(path):
-        node = _child(node, segment, walked)
-        walked = f"{walked}.{segment}" if walked else segment
-    return node
+    return _walk(data, _split(path))[0]
 
 
 def _coerce(value: Any, existing: Any, path: str) -> Any:
     if isinstance(value, bool | int | float):
         if isinstance(existing, str):
             raise RawValueError(f"{path} holds the string {existing!r}; write a string")
-        if isinstance(existing, bool):
-            return bool(value)
-        if isinstance(existing, int) and not isinstance(value, bool):
-            if float(value) != int(value):
-                raise RawValueError(f"{path} holds an int; {value!r} isn't one")
-            return int(value)
         if isinstance(existing, dict | list):
             raise RawValueError(f"{path} is a section, not a value")
-        return struct.unpack(">f", struct.pack(">f", float(value)))[0]
+        if isinstance(existing, bool):
+            if not isinstance(value, bool):
+                raise RawValueError(f"{path} holds a bool; write true or false")
+            return value
+        if not math.isfinite(value):
+            raise RawValueError(f"{path}: {value!r} isn't a finite number")
+        if isinstance(existing, int):
+            if isinstance(value, bool) or value != int(value):
+                raise RawValueError(f"{path} holds an int; {value!r} isn't one")
+            return int(value)
+        try:
+            return struct.unpack(">f", struct.pack(">f", float(value)))[0]
+        except OverflowError:
+            raise RawValueError(f"{path}: {value!r} is too large for a 32-bit float") from None
     if isinstance(value, str):
         if existing is not None and not isinstance(existing, str):
             raise RawValueError(f"{path} holds a {type(existing).__name__}; can't write a string")
@@ -339,12 +331,7 @@ def _coerce(value: Any, existing: Any, path: str) -> Any:
 
 def _set_path(data: Any, path: str, value: Any) -> Change:
     *parents, leaf = _split(path)
-    node, walked = data, ""
-    for segment in parents:
-        if _is_default(node, segment):
-            node[segment] = {}
-        node = _child(node, segment, walked)
-        walked = f"{walked}.{segment}" if walked else segment
+    node, walked = _walk(data, parents, create_plain_params=True)
 
     if isinstance(node, list):
         existing = _child(node, leaf, walked)
@@ -354,13 +341,13 @@ def _set_path(data: Any, path: str, value: Any) -> Change:
         _child(node, leaf, walked)  # raises with a description of ``node``
     created = leaf not in node
     existing = None if created else node[leaf]
-    if existing == _DEFAULT_SENTINEL and leaf == "plainParams":
+    if _is_default_plain_params(node, leaf):
         raise RawValueError(f"{path} is a section, not a value")
     node[leaf] = new = _coerce(value, existing, path)
     return Change(path, existing, new, created=created)
 
 
-def _is_default(node: Any, segment: str) -> bool:
+def _is_default_plain_params(node: Any, segment: str) -> bool:
     return (
         isinstance(node, dict)
         and segment == "plainParams"

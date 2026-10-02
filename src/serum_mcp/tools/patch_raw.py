@@ -7,7 +7,7 @@ from typing import Any
 
 from serum_mcp.preset.raw import RawPreset
 
-from .read_raw import jsonable
+from ._jsonable import jsonable
 
 
 def patch_raw(preset_path: str, patches: dict[str, Any], output_path: str) -> str:
