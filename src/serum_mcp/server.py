@@ -13,6 +13,8 @@ separate, separately-billed API call.
 
 from __future__ import annotations
 
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
@@ -26,6 +28,8 @@ from serum_mcp.tools.find_reference_presets import (
 from serum_mcp.tools.generate_preset import generate_preset as _generate_preset
 from serum_mcp.tools.list_parameters import list_parameters as _list_parameters
 from serum_mcp.tools.list_sample_files import list_sample_files as _list_sample_files
+from serum_mcp.tools.patch_raw import patch_raw as _patch_raw
+from serum_mcp.tools.read_raw import read_raw as _read_raw
 
 mcp = FastMCP(
     name="serum-mcp",
@@ -1043,6 +1047,64 @@ def describe_preset(preset_path: str) -> str:
     """Return a human-readable summary of an existing preset's sound-shaping
     parameters (oscillators, filters, envelopes, FX chain, mod routes, globals)."""
     return _describe_preset(preset_path)
+
+
+@mcp.tool(
+    title="Read raw preset",
+    annotations=ToolAnnotations(
+        title="Read raw preset",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def read_raw(preset_path: str, path: str | None = None) -> str:
+    """Return a preset's complete decoded state as JSON -- every value Serum
+    stored, including what describe_preset/PresetSpec don't model (synced LFO
+    rates, convolution impulses, mod curves, phase, all 64 mod slots).
+
+    ``path`` selects a subtree with dotted keys, e.g. ``"LFO0"``,
+    ``"ModSlot3.plainParams"`` or ``"FXRack0"``; list elements are indexed
+    by number (``"LFO0.curve.0"``). Without ``path`` the whole preset is
+    returned, typically ~25 KB but up to ~1 MB for presets with embedded
+    tables or sample maps -- prefer reading the section you need. Parameters
+    live under ``<Section>.plainParams``; a key missing there (or a
+    ``plainParams`` of ``"default"``) is at Serum's default. 32-bit floats are
+    shown as their shortest exact decimal.
+    """
+    return _read_raw(preset_path, path)
+
+
+@mcp.tool(
+    title="Patch raw preset",
+    annotations=ToolAnnotations(
+        title="Patch raw preset",
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=False,
+    ),
+)
+def patch_raw(preset_path: str, patches: dict[str, Any], output_path: str) -> str:
+    """Write exactly the keys in ``patches`` (dotted path -> value, paths as in
+    read_raw) into a copy of ``preset_path``, saved to ``output_path``.
+    Every other byte of the preset is kept, so this is the safe way to change
+    a real third-party preset. Pass the same path twice to write in place.
+
+    Numbers and booleans are written as 32-bit floats (true/false as 1.0/0.0),
+    the way Serum stores parameters; int and bool structural fields such as
+    ``numFrames`` keep their type, and strings (enum values such as
+    ``kParamType``) can only replace strings. A missing final key is created
+    (a ``plainParams`` of ``"default"`` becomes a dict holding just that key);
+    a missing section is an error. All patches are checked before anything is
+    written. Values are not range-checked: use list_parameters() and
+    read_raw() on a similar preset to find valid names and values.
+
+    Returns the absolute output path as the first line, then one
+    ``path: old -> new`` line per change.
+    """
+    return _patch_raw(preset_path, patches, output_path)
 
 
 @mcp.tool(
