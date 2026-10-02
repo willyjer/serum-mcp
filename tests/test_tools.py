@@ -12,7 +12,7 @@ import pytest
 
 from serum_mcp import config
 from serum_mcp.generation.spec import EnvelopeSpec, FilterSpec, OscillatorSpec, PresetSpec
-from serum_mcp.preset.packer import unpack_file
+from serum_mcp.preset.packer import pack_file, unpack_file
 from serum_mcp.tools import describe_preset as describe_preset_mod
 from serum_mcp.tools import edit_preset as edit_preset_mod
 from serum_mcp.tools import generate_preset as generate_preset_mod
@@ -167,6 +167,44 @@ def test_describe_preset_mentions_key_sections():
     assert "Osc A" in summary
     assert "Filter 1" in summary
     assert "Env 1" in summary
+
+
+def _init_preset_with(tmp_path, patch) -> str:
+    """The init fixture with ``patch(data)`` applied, written to tmp_path."""
+    fixtures_dir = Path(__file__).resolve().parents[1] / "fixtures"
+    preset = unpack_file(fixtures_dir / "init_preset.SerumPreset")
+    patch(preset.data)
+    return str(pack_file(preset, tmp_path / "patched.SerumPreset"))
+
+
+@pytest.mark.parametrize(
+    ("patch", "expected"),
+    [
+        # Factory "SEQ - A Hint of Retro": a balance leaning to Filter 1.
+        (
+            lambda d: d.__setitem__(
+                "RoutingSlot0", {"plainParams": {"kParamFilterBalance": -98.59649119898677}}
+            ),
+            "Osc A",
+        ),
+        # "BRAINWAVEZ - BS Guilty": a 32 s hold.
+        (lambda d: d.__setitem__("Env0", {"plainParams": {"kParamHold": 32.0}}), "hold=32000.0ms"),
+        # Factory "SC - Birds": a spectral window starting below 20 Hz.
+        (
+            lambda d: (
+                d["Oscillator0"].__setitem__("plainParams", {"kParamType": "kOsc_Spectral"}),
+                d["Oscillator0"]["SpectralOsc0"].__setitem__(
+                    "plainParams", {"kParamFreqLo": 15.945181234369928}
+                ),
+            ),
+            "Osc A",
+        ),
+    ],
+    ids=["negative-filter-balance", "32s-hold", "spectral-freq-lo-below-20"],
+)
+def test_describe_preset_reads_real_values_that_used_to_crash_it(tmp_path, patch, expected):
+    summary = describe_preset_mod.describe_preset(_init_preset_with(tmp_path, patch))
+    assert expected in summary
 
 
 def test_list_parameters_is_valid_json_with_expected_sections():

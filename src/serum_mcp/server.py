@@ -359,7 +359,7 @@ mcp = FastMCP(
         "deliberately bypassing the filter stage for one layer (e.g. keeping a bright "
         "transient/noise layer out of a resonant/saturating filter shaping the rest of "
         "the stack -- set that oscillator's filter_routing='master'). "
-        "oscillators[].filter_balance (0-100) only matters when filter_routing='filter' "
+        "oscillators[].filter_balance (-100 to 100) only matters when filter_routing='filter' "
         "(or unset) and both filters are enabled; leave unset unless matching a specific "
         "real reference value. oscillators[]/filters[].fx_bus1_send/fx_bus2_send (0-100, "
         "paired with global.fx_bus1_volume/fx_bus2_volume and global.fx_bus1_destination/"

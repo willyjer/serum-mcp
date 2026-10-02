@@ -3657,12 +3657,13 @@ SPECTRALOSC_PARAMS: dict[str, ParamDef] = {
         "kParamFreqLo",
         "float",
         default=20.0,
-        min=20.0,
+        min=0.0,
         max=20000.0,
         unit="Hz",
         confidence="observed",
         notes="Low edge of the frequency range the spectral "
-        "effect applies to. Real range observed 15.9-4307.3 Hz.",
+        "effect applies to. Real range observed 15.9-4307.3 Hz, so min is 0 rather "
+        "than 20 (Serum's own floor not probed).",
     ),
     "kParamFreqHi": ParamDef(
         "kParamFreqHi",
@@ -4177,7 +4178,17 @@ ENV_PARAMS: dict[str, ParamDef] = {
         "Factory preset (FX - Wasp Whistle Sweep) with attack=9.46 in the raw CBOR -- "
         "same VST3-dump-undersells-the-real-range pattern as kParamRelease.",
     ),
-    "kParamHold": ParamDef("kParamHold", "float", default=0.0, min=0.0, max=5.2, unit="seconds"),
+    "kParamHold": ParamDef(
+        "kParamHold",
+        "float",
+        default=0.0,
+        min=0.0,
+        max=32.0,
+        unit="seconds",
+        confidence="observed",
+        notes="Max raised from 5.2 to 32.0 after a real preset (BRAINWAVEZ - BS Guilty) "
+        "stored hold=32.0, the same ceiling as decay/release.",
+    ),
     "kParamDecay": ParamDef(
         "kParamDecay",
         "float",
@@ -4953,11 +4964,12 @@ ROUTING_SLOT_PARAMS: dict[str, ParamDef] = {
         "kParamFilterBalance",
         "float",
         default=0.0,
-        min=0.0,
+        min=-100.0,
         max=100.0,
         confidence="observed",
         notes="Only meaningful when kParamRoutingDest='kRoutingDestFilter' and BOTH "
-        "filters are in use -- balance between Filter 1 and Filter 2. Exact scale "
+        "filters are in use -- balance between Filter 1 and Filter 2. Bipolar: real "
+        "presets store -98.6 to 100 (15 Factory presets are negative). Exact scale "
         "(0=Filter1-only vs 50/50 vs Filter2-only) not independently confirmed; a real "
         "Dreams route used 100.0 alongside Osc A+B+Noise visually confirmed feeding "
         "Filter 2 in the real UI, suggesting higher values lean toward Filter 2.",

@@ -1207,7 +1207,7 @@ directly rather than trusting the extracted `PresetSpec` was complete:
     `"filter"` (default when unset, normal path through the enabled
     VoiceFilter(s)), `"master"` (bypasses both filters straight to the main
     output), `"direct"` (bypasses filters AND the FX bus system), or
-    `"none"`. `filter_balance` (0-100) sets `kParamFilterBalance` when both
+    `"none"`. `filter_balance` (-100 to 100) sets `kParamFilterBalance` when both
     filters are in use and this oscillator routes through them; exact scale
     still not independently confirmed (see item 11), only that a real
     Dreams route used 100.0 while visually routed toward Filter 2. Left
